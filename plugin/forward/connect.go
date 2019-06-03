@@ -70,7 +70,7 @@ func (t *Transport) Dial(proto string) (*dns.Conn, bool, error) {
 }
 
 // Connect selects an upstream, sends the request and waits for a response.
-func (p *Proxy) Connect(ctx context.Context, state request.Request, opts options) (*dns.Msg, error) {
+func (p *Proxy) Connect(ctx context.Context, state request.Request, opts options) (*dns.Msg, []dns.RR, error) {
 	start := time.Now()
 
 	proto := ""
@@ -85,7 +85,7 @@ func (p *Proxy) Connect(ctx context.Context, state request.Request, opts options
 
 	conn, cached, err := p.transport.Dial(proto)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Set buffer size correctly for this client.
@@ -94,25 +94,72 @@ func (p *Proxy) Connect(ctx context.Context, state request.Request, opts options
 		conn.UDPSize = 512
 	}
 
+	var retRRs []dns.RR
+	var ret *dns.Msg
+
+	if state.QType() == dns.TypeAXFR || state.QType() == dns.TypeIXFR {
+		conn.SetWriteDeadline(time.Now().Add(maxTimeout))
+		if err := conn.WriteMsg(state.Req); err != nil {
+			conn.Close() // not giving it back
+			if err == io.EOF && cached {
+				return nil, nil, ErrCachedClosed
+			}
+			return nil, nil, err
+		}
+		first := true
+		for {
+			conn.SetReadDeadline(time.Now().Add(readTimeout))
+			in, err := conn.ReadMsg()
+			if err != nil {
+				conn.Close() // not giving it back
+				if err == io.EOF && cached {
+					return nil, nil, ErrCachedClosed
+				}
+				return ret, nil, err
+			}
+			if state.Req.Id != in.Id {
+				// out-of-order response. unexpected.
+				continue
+			}
+			if first {
+				if len(in.Answer) == 0 || in.Answer[0].Header().Rrtype != dns.TypeSOA {
+					conn.Close()
+					return nil, nil, dns.ErrSoa
+				}
+				first = !first
+				if len(in.Answer) == 1 {
+					retRRs = append(retRRs, in.Answer[0])
+					continue
+				}
+			}
+			for _, rr := range in.Answer {
+				retRRs = append(retRRs, rr)
+			}
+			if len(in.Answer) >= 0 && in.Answer[len(in.Answer)-1].Header().Rrtype == dns.TypeSOA {
+				break
+			}
+		}
+		p.transport.Yield(conn)
+		return nil, retRRs, nil
+	}
 	conn.SetWriteDeadline(time.Now().Add(maxTimeout))
 	if err := conn.WriteMsg(state.Req); err != nil {
 		conn.Close() // not giving it back
 		if err == io.EOF && cached {
-			return nil, ErrCachedClosed
+			return nil, nil, ErrCachedClosed
 		}
-		return nil, err
+		return nil, nil, err
 	}
 
-	var ret *dns.Msg
 	conn.SetReadDeadline(time.Now().Add(readTimeout))
 	for {
 		ret, err = conn.ReadMsg()
 		if err != nil {
 			conn.Close() // not giving it back
 			if err == io.EOF && cached {
-				return nil, ErrCachedClosed
+				return nil, nil, ErrCachedClosed
 			}
-			return ret, err
+			return ret, nil, err
 		}
 		// drop out-of-order responses
 		if state.Req.Id == ret.Id {
@@ -131,7 +178,7 @@ func (p *Proxy) Connect(ctx context.Context, state request.Request, opts options
 	RcodeCount.WithLabelValues(rc, p.addr).Add(1)
 	RequestDuration.WithLabelValues(p.addr).Observe(time.Since(start).Seconds())
 
-	return ret, nil
+	return ret, nil, nil
 }
 
 const cumulativeAvgWeight = 4
