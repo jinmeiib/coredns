@@ -15,25 +15,8 @@ type Xfr struct {
 	*Zone
 }
 
-// ServeDNS implements the plugin.Handler interface.
-func (x Xfr) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-	state := request.Request{W: w, Req: r}
-	if !x.TransferAllowed(state) {
-		return dns.RcodeServerFailure, nil
-	}
-	if state.QType() != dns.TypeAXFR && state.QType() != dns.TypeIXFR {
-		return 0, plugin.Error(x.Name(), fmt.Errorf("xfr called with non transfer type: %d", state.QType()))
-	}
-
-	records := x.All()
-	if len(records) == 0 {
-		return dns.RcodeServerFailure, nil
-	}
-
-	ch := make(chan *dns.Envelope)
+func (x Xfr) xfrOut(state request.Request, records []dns.RR, w dns.ResponseWriter, r *dns.Msg, ch chan<- *dns.Envelope) {
 	defer close(ch)
-	tr := new(dns.Transfer)
-	go tr.Out(w, r, ch)
 
 	j, l := 0, 0
 	records = append(records, records[0]) // add closing SOA to the end
@@ -49,9 +32,41 @@ func (x Xfr) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (in
 	if j < len(records) {
 		ch <- &dns.Envelope{RR: records[j:]}
 	}
+}
 
-	w.Hijack()
-	// w.Close() // Client closes connection
+// ServeDNS implements the plugin.Handler interface.
+func (x Xfr) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+	// After responding to an xfr query we won't accept any more query on the connection; the client would normally close the connection anyway.
+	defer w.Close()
+
+	state := request.Request{W: w, Req: r}
+	if !x.TransferAllowed(state) {
+		return dns.RcodeServerFailure, nil
+	}
+	if state.QType() != dns.TypeAXFR && state.QType() != dns.TypeIXFR {
+		return 0, plugin.Error(x.Name(), fmt.Errorf("xfr called with non transfer type: %d", state.QType()))
+	}
+
+	records := x.All()
+	if len(records) == 0 {
+		return dns.RcodeServerFailure, nil
+	}
+
+	tr := new(dns.Transfer)
+	ch := make(chan *dns.Envelope)
+	done := make(chan struct{})
+	go func() {
+		defer func() {
+			done <- struct{}{}
+		}()
+		tr.Out(w, r, ch)
+	}()
+
+	// Pass all records to the goroutine, which will send the response to the client.
+	// We can't return and close the connection until it completes as the goroutine uses it.
+	x.xfrOut(state, records, w, r, ch)
+	<-done
+
 	return dns.RcodeSuccess, nil
 }
 
