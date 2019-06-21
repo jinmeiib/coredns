@@ -17,9 +17,10 @@ func TestLargeAXFR(t *testing.T) {
 
 	// Build a large zone in text format.  It contains 64K AAAA RRs.
 	var sb strings.Builder
+	const numAAAAs = 65536
 	sb.WriteString("example.com. IN SOA . . 1 60 60 60 60\n")
 	sb.WriteString("example.com. IN NS ns.example.\n")
-	for i := 0; i < 65536; i++ {
+	for i := 0; i < numAAAAs; i++ {
 		sb.WriteString(fmt.Sprintf("%d.example.com. IN AAAA 2001:db8::1\n", i))
 	}
 
@@ -78,7 +79,8 @@ func TestLargeAXFR(t *testing.T) {
 			break
 		}
 	}
-	if nrr != 65539 {
+	// On successful completion, 2 SOA, 1 NS, and all AAAAs should have been transferred.
+	if nrr != numAAAAs + 3 {
 		t.Fatalf("Got an unexpected number of RRs: %d", nrr)
 	}
 
