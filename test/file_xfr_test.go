@@ -13,8 +13,6 @@ import (
 )
 
 func TestLargeAXFR(t *testing.T) {
-	t.Parallel()
-
 	// Build a large zone in text format.  It contains 64K AAAA RRs.
 	var sb strings.Builder
 	const numAAAAs = 65536
