@@ -56,7 +56,7 @@ func TestLargeAXFR(t *testing.T) {
 		t.Fatalf("Unable to send TCP query: %s", err)
 	}
 
-	nrr := 0		// total number of transferred RRs
+	nrr := 0                                             // total number of transferred RRs
 	co.SetReadDeadline(time.Now().Add(60 * time.Second)) // use a longer timeout as it involves transferring a non-trivial amount of data.
 	for {
 		resp, err := co.ReadMsg()
@@ -78,7 +78,7 @@ func TestLargeAXFR(t *testing.T) {
 		}
 	}
 	// On successful completion, 2 SOA, 1 NS, and all AAAAs should have been transferred.
-	if nrr != numAAAAs + 3 {
+	if nrr != numAAAAs+3 {
 		t.Fatalf("Got an unexpected number of RRs: %d", nrr)
 	}
 
